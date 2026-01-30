@@ -53,6 +53,25 @@ Connections persist in the Agent's [SQL storage](/agents/api-reference/store-and
 Add a connection to an MCP server and make its tools available to your Agent.
 
 ```ts
+// Preferred signature (options-based)
+async addMcpServer(
+  serverName: string,
+  url: string,
+  options?: {
+    callbackHost?: string;
+    agentsPrefix?: string;
+    client?: ConstructorParameters<typeof Client>[1];
+    transport?: {
+      headers?: HeadersInit;
+      type?: "sse" | "streamable-http" | "auto";
+    };
+  }
+): Promise<
+  | { id: string; state: "authenticating"; authUrl: string }
+  | { id: string; state: "ready"; authUrl?: undefined }
+>
+
+// Legacy signature (still supported)
 async addMcpServer(
   serverName: string,
   url: string,
@@ -75,9 +94,9 @@ async addMcpServer(
 
 - **`serverName`** (string, required) — Display name for the MCP server
 - **`url`** (string, required) — URL of the MCP server endpoint
-- **`callbackHost`** (string, optional) — Host for OAuth callback URL. If omitted, automatically derived from the incoming request
-- **`agentsPrefix`** (string, optional) — URL prefix for OAuth callback path. Default: `"agents"`
 - **`options`** (object, optional) — Connection configuration:
+  - **`callbackHost`** (string, optional) — Host for OAuth callback URL. If omitted, automatically derived from the incoming request
+  - **`agentsPrefix`** (string, optional) — URL prefix for OAuth callback path. Default: `"agents"`
   - **`client`** — MCP client configuration options (passed to `@modelcontextprotocol/sdk` Client constructor). By default, includes `CfWorkerJsonSchemaValidator` for validating tool parameters against JSON schemas.
   - **`transport`** — Transport layer configuration:
     - **`headers`** — Custom HTTP headers for authentication
@@ -103,9 +122,18 @@ A Promise that resolves to a discriminated union based on connection state:
 ```ts title="src/index.ts"
 export class MyAgent extends Agent<Env, never> {
 	async onRequest(request: Request): Promise<Response> {
+		// Preferred options-based API
 		const result = await this.addMcpServer(
 			"Weather API",
 			"https://weather-mcp.example.com/mcp",
+			{
+				transport: {
+					type: "auto",
+					headers: {
+						"Authorization": "Bearer token"
+					}
+				}
+			}
 		);
 
 		if (result.state === "authenticating") {

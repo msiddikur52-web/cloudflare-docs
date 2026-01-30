@@ -7,157 +7,375 @@ sidebar:
 
 import { MetaInfo, Render, Type, TypeScriptExample, WranglerConfig } from "~/components";
 
-Every Agent has built-in state management capabilities, including built-in storage and synchronization between the Agent and frontend applications.
+Every Agent has built-in state management capabilities with automatic persistence and real-time synchronization across all connected clients.
 
-State within an Agent is:
+## Overview
 
-* Persisted across Agent restarts: data is permanently stored within an Agent.
-* Automatically serialized/deserialized: you can store any JSON-serializable data.
-* Immediately consistent within the Agent: read your own writes.
-* Thread-safe for concurrent updates
-* Fast: state is colocated wherever the Agent is running. Reads and writes do not need to traverse the network.
+Agent state is:
 
-Agent state is stored in a SQL database that is embedded within each individual Agent instance: you can interact with it using the higher-level `this.setState` API (recommended), which allows you to sync state and trigger events on state changes, or by directly querying the database with `this.sql`.
-
-#### State API
-
-Every Agent has built-in state management capabilities. You can set and update the Agent's state directly using `this.setState`:
+* **Persistent** - Automatically saved to SQLite, survives restarts and hibernation
+* **Synchronized** - Changes broadcast to all connected WebSocket clients instantly
+* **Bidirectional** - Both server and clients can update state
+* **Type-safe** - Full TypeScript support with generics
+* **Immediately consistent** within the Agent: read your own writes
+* **Thread-safe** for concurrent updates
+* **Fast** - state is colocated wherever the Agent is running. Reads and writes do not need to traverse the network.
 
 <TypeScriptExample>
 
 ```ts
 import { Agent } from "agents";
 
-export class MyAgent extends Agent {
-  // Update state in response to events
-  async incrementCounter() {
-    this.setState({
-      ...this.state,
-      counter: this.state.counter + 1,
-    });
-  }
+type GameState = {
+  players: string[];
+  score: number;
+  status: "waiting" | "playing" | "finished";
+};
 
-  // Handle incoming messages
-  async onMessage(message) {
-    if (message.type === "update") {
-      this.setState({
-        ...this.state,
-        ...message.data,
-      });
+export class GameAgent extends Agent<Env, GameState> {
+  // Default state for new agents
+  initialState: GameState = {
+    players: [],
+    score: 0,
+    status: "waiting"
+  };
+
+  // React to state changes
+  onStateUpdate(state: GameState, source: Connection | "server") {
+    if (source !== "server" && state.players.length >= 2) {
+      // Client added a player, start the game
+      this.setState({ ...state, status: "playing" });
     }
   }
 
-  // Handle state updates
-  onStateUpdate(state, source: "server" | Connection) {
-    console.log("state updated", state);
+  addPlayer(name: string) {
+    this.setState({
+      ...this.state,
+      players: [...this.state.players, name]
+    });
   }
 }
 ```
 
 </TypeScriptExample>
 
-If you're using TypeScript, you can also provide a type for your Agent's state by passing in a type as a [type parameter](https://www.typescriptlang.org/docs/handbook/2/generics.html#using-type-parameters-in-generic-constraints) as the _second_ type parameter to the `Agent` class definition.
+## Defining Initial State
 
-<TypeScriptExample>
-
-```ts
-import { Agent } from "agents";
-
-interface Env {}
-
-// Define a type for your Agent's state
-interface FlightRecord {
-	id: string;
-	departureIata: string;
-	arrival: Date;
-	arrivalIata: string;
-	price: number;
-}
-
-// Pass in the type of your Agent's state
-export class MyAgent extends Agent<Env, FlightRecord> {
-  // This allows this.setState and the onStateUpdate method to
-  // be typed:
- 	async onStateUpdate(state: FlightRecord) {
-  	console.log("state updated", state);
-  }
-
-  async someOtherMethod() {
-  	this.setState({
-  		...this.state,
-  		price: this.state.price + 10,
-  	});
-  }
-}
-```
-
-</TypeScriptExample>
-
-### Set the initial state for an Agent
-
-You can also set the initial state for an Agent via the `initialState` property on the `Agent` class:
+Use the `initialState` property to define default values for new agent instances:
 
 <TypeScriptExample>
 
 ```ts
 type State = {
-  counter: number;
-  text: string;
-  color: string;
+  messages: Message[];
+  settings: UserSettings;
+  lastActive: string | null;
 };
 
-class MyAgent extends Agent<Env, State> {
-	// Set a default, initial state
-  initialState = {
-    counter: 0,
-    text: "",
-    color: "#3B82F6",
+export class ChatAgent extends Agent<Env, State> {
+  initialState: State = {
+    messages: [],
+    settings: { theme: "dark", notifications: true },
+    lastActive: null
   };
-
-  doSomething() {
-    console.log(this.state); // {counter: 0, text: "", color: "#3B82F6"}, if you haven't set the state yet
-  }
 }
 ```
+
 </TypeScriptExample>
 
-Any initial state is synced to clients connecting via [the `useAgent` hook](#synchronizing-state).
+### Type Safety
 
-### Synchronizing state
-
-Clients can connect to an Agent and stay synchronized with its state using the React hooks provided as part of `agents/react`.
-
-A React application can call `useAgent` to connect to a named Agent over WebSockets at
+The second generic parameter to `Agent<Env, State>` defines your state type:
 
 <TypeScriptExample>
 
 ```ts
-import { useState } from "react";
-import { useAgent } from "agents/react";
+// State is fully typed
+export class MyAgent extends Agent<Env, MyState> {
+  initialState: MyState = { count: 0 };
 
-function StateInterface() {
-  const [state, setState] = useState({ counter: 0 });
-
-  const agent = useAgent({
-    agent: "thinking-agent",
-    name: "my-agent",
-    onStateUpdate: (newState) => setState(newState),
-  });
-
-  const increment = () => {
-    agent.setState({ counter: state.counter + 1 });
-  };
-
-  return (
-    <div>
-      <div>Count: {state.counter}</div>
-      <button onClick={increment}>Increment</button>
-    </div>
-  );
+  increment() {
+    // TypeScript knows this.state is MyState
+    this.setState({ count: this.state.count + 1 });
+  }
 }
 ```
 
 </TypeScriptExample>
+
+### When Initial State Applies
+
+Initial state is applied lazily on first access, not on every wake:
+
+1. **New agent** - `initialState` is used and persisted
+2. **Existing agent** - Persisted state is loaded from SQLite
+3. **No `initialState` defined** - `this.state` is `undefined`
+
+<TypeScriptExample>
+
+```ts
+async onStart() {
+  // Safe to access - returns initialState if new, or persisted state
+  console.log("Current count:", this.state.count);
+}
+```
+
+</TypeScriptExample>
+
+## Reading State
+
+Access the current state via the `this.state` getter:
+
+<TypeScriptExample>
+
+```ts
+async onRequest(request: Request) {
+  // Read current state
+  const { players, status } = this.state;
+
+  if (status === "waiting" && players.length < 2) {
+    return new Response("Waiting for players...");
+  }
+
+  return new Response(JSON.stringify(this.state));
+}
+```
+
+</TypeScriptExample>
+
+### Undefined State
+
+If you do not define `initialState`, `this.state` returns `undefined`:
+
+<TypeScriptExample>
+
+```ts
+export class MinimalAgent extends Agent<Env> {
+  // No initialState defined
+
+  async onConnect(connection: Connection) {
+    if (!this.state) {
+      // First time - initialize state
+      this.setState({ initialized: true });
+    }
+  }
+}
+```
+
+</TypeScriptExample>
+
+## Updating State
+
+Use `setState()` to update state. This:
+
+1. Saves to SQLite (persistent)
+2. Broadcasts to all connected clients
+3. Triggers `onStateUpdate()`
+
+<TypeScriptExample>
+
+```ts
+// Replace entire state
+this.setState({
+  players: ["Alice", "Bob"],
+  score: 0,
+  status: "playing"
+});
+
+// Update specific fields (spread existing state)
+this.setState({
+  ...this.state,
+  score: this.state.score + 10
+});
+```
+
+</TypeScriptExample>
+
+### State Must Be Serializable
+
+State is stored as JSON, so it must be serializable:
+
+<TypeScriptExample>
+
+```ts
+// Good - plain objects, arrays, primitives
+this.setState({
+  items: ["a", "b", "c"],
+  count: 42,
+  active: true,
+  metadata: { key: "value" }
+});
+
+// Bad - functions, classes, circular references
+this.setState({
+  callback: () => {}, // Functions do not serialize
+  date: new Date(), // Becomes string, loses methods
+  self: this // Circular reference
+});
+
+// For dates, use ISO strings
+this.setState({
+  createdAt: new Date().toISOString()
+});
+```
+
+</TypeScriptExample>
+
+## Responding to State Changes
+
+Override `onStateUpdate()` to react when state changes:
+
+<TypeScriptExample>
+
+```ts
+onStateUpdate(state: GameState, source: Connection | "server") {
+  console.log("State updated:", state);
+  console.log("Updated by:", source === "server" ? "server" : source.id);
+}
+```
+
+</TypeScriptExample>
+
+### The `source` Parameter
+
+The `source` tells you who triggered the update:
+
+| Value        | Meaning                             |
+| ------------ | ----------------------------------- |
+| `"server"`   | Agent called `setState()`           |
+| `Connection` | A client pushed state via WebSocket |
+
+This is useful for:
+
+- Avoiding infinite loops (do not react to your own updates)
+- Validating client input
+- Triggering side effects only on client actions
+
+<TypeScriptExample>
+
+```ts
+onStateUpdate(state: State, source: Connection | "server") {
+  // Ignore server-initiated updates
+  if (source === "server") return;
+
+  // A client updated state - validate and process
+  const connection = source;
+  console.log(`Client ${connection.id} updated state`);
+
+  // Maybe trigger something based on the change
+  if (state.status === "submitted") {
+    this.processSubmission(state);
+  }
+}
+```
+
+</TypeScriptExample>
+
+### Common Pattern: Client-Driven Actions
+
+<TypeScriptExample>
+
+```ts
+onStateUpdate(state: State, source: Connection | "server") {
+  if (source === "server") return;
+
+  // Client added a message
+  const lastMessage = state.messages[state.messages.length - 1];
+  if (lastMessage && !lastMessage.processed) {
+    // Process and update
+    this.setState({
+      ...state,
+      messages: state.messages.map(m =>
+        m.id === lastMessage.id ? { ...m, processed: true } : m
+      )
+    });
+  }
+}
+```
+
+</TypeScriptExample>
+
+## Client-Side State Sync
+
+State synchronizes automatically with connected clients. Refer to the [Client SDK documentation](/agents/getting-started/) for full details.
+
+### React (useAgent)
+
+<TypeScriptExample>
+
+```ts
+import { useAgent } from "agents/react";
+
+function GameUI() {
+  const agent = useAgent({
+    agent: "game-agent",
+    name: "room-123",
+    onStateUpdate: (state, source) => {
+      console.log("State updated:", state);
+    }
+  });
+
+  // Push state to agent
+  const addPlayer = (name: string) => {
+    agent.setState({
+      ...agent.state,
+      players: [...agent.state.players, name]
+    });
+  };
+
+  return <div>Players: {agent.state?.players.join(", ")}</div>;
+}
+```
+
+</TypeScriptExample>
+
+### Vanilla JS (AgentClient)
+
+<TypeScriptExample>
+
+```ts
+import { AgentClient } from "agents/client";
+
+const client = new AgentClient({
+  agent: "game-agent",
+  name: "room-123",
+  onStateUpdate: (state) => {
+    document.getElementById("score").textContent = state.score;
+  }
+});
+
+// Push state update
+client.setState({ ...client.state, score: 100 });
+```
+
+</TypeScriptExample>
+
+### State Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Agent                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │                    this.state                       │    │
+│  │              (persisted in SQLite)                  │    │
+│  └─────────────────────────────────────────────────────┘    │
+│           ▲                              │                  │
+│           │ setState()                   │ broadcast        │
+│           │                              ▼                  │
+└───────────┼──────────────────────────────┼──────────────────┘
+            │                              │
+            │                              │ WebSocket
+            │                              │
+┌───────────┴──────────────────────────────┴───────────────────┐
+│                        Clients                               │
+│   ┌──────────┐    ┌──────────┐    ┌──────────┐               │
+│   │ Client 1 │    │ Client 2 │    │ Client 3 │               │
+│   │  state   │    │  state   │    │  state   │               │
+│   └──────────┘    └──────────┘    └──────────┘               │
+│                                                              │
+│   Any client can call setState() to push updates             │
+└──────────────────────────────────────────────────────────────┘
+```
 
 The state synchronization system:
 
@@ -169,53 +387,220 @@ The state synchronization system:
 Common use cases:
 
 * Real-time collaborative features
-* Multi-window/tab synchronization
+* Multi-window or tab synchronization
 * Live updates across multiple devices
 * Maintaining consistent UI state across clients
 * When new clients connect, they automatically receive the current state from the Agent, ensuring all clients start with the latest data.
 
-### SQL API
+## State from Workflows
 
-Every individual Agent instance has its own SQL (SQLite) database that runs _within the same context_ as the Agent itself. This means that inserting or querying data within your Agent is effectively zero-latency: the Agent doesn't have to round-trip across a continent or the world to access its own data.
-
-You can access the SQL API within any method on an Agent via `this.sql`. The SQL API accepts template literals, and
+When using [Workflows](/agents/api-reference/run-workflows/), you can update agent state from workflow steps:
 
 <TypeScriptExample>
 
 ```ts
-export class MyAgent extends Agent<Env> {
-	async onRequest(request: Request) {
-		let userId = new URL(request.url).searchParams.get('userId');
+// In your workflow
+async run(event: AgentWorkflowEvent<Params>, step: AgentWorkflowStep) {
+  // Replace entire state
+  await step.updateAgentState({ status: "processing", progress: 0 });
 
-		// 'users' is just an example here: you can create arbitrary tables and define your own schemas
-		// within each Agent's database using SQL (SQLite syntax).
-		let [user] = this.sql`SELECT * FROM users WHERE id = ${userId}`
-		return Response.json(user)
-	}
+  // Merge partial updates (preserves other fields)
+  await step.mergeAgentState({ progress: 50 });
+
+  // Reset to initialState
+  await step.resetAgentState();
+
+  return result;
 }
 ```
 
 </TypeScriptExample>
 
-You can also supply a [TypeScript type argument](https://www.typescriptlang.org/docs/handbook/2/generics.html#using-type-parameters-in-generic-constraints) to the query, which will be used to infer the type of the result:
+These are durable operations and persist even if the workflow retries.
+
+## Patterns and Best Practices
+
+### Keep State Small
+
+State is broadcast to all clients on every change. For large data:
+
+<TypeScriptExample>
+
+```ts
+// Bad - storing large arrays in state
+initialState = {
+  allMessages: []  // Could grow to thousands of items
+};
+
+// Good - store in SQL, keep state light
+initialState = {
+  messageCount: 0,
+  lastMessageId: null
+};
+
+// Query SQL for full data
+async getMessages(limit = 50) {
+  return this.sql`SELECT * FROM messages ORDER BY created_at DESC LIMIT ${limit}`;
+}
+```
+
+</TypeScriptExample>
+
+### Optimistic Updates
+
+For responsive UIs, update client state immediately:
+
+<TypeScriptExample>
+
+```ts
+// Client-side
+function sendMessage(text: string) {
+  const optimisticMessage = {
+    id: crypto.randomUUID(),
+    text,
+    pending: true
+  };
+
+  // Update immediately
+  agent.setState({
+    ...agent.state,
+    messages: [...agent.state.messages, optimisticMessage]
+  });
+
+  // Server will confirm or update
+}
+
+// Server-side
+onStateUpdate(state: State, source: Connection | "server") {
+  if (source === "server") return;
+
+  const pendingMessages = state.messages.filter(m => m.pending);
+  for (const msg of pendingMessages) {
+    // Validate and confirm
+    this.setState({
+      ...state,
+      messages: state.messages.map(m =>
+        m.id === msg.id ? { ...m, pending: false, timestamp: Date.now() } : m
+      )
+    });
+  }
+}
+```
+
+</TypeScriptExample>
+
+### State vs SQL
+
+| Use State For                      | Use SQL For       |
+| ---------------------------------- | ----------------- |
+| UI state (loading, selected items) | Historical data   |
+| Real-time counters                 | Large collections |
+| Active session data                | Relationships     |
+| Configuration                      | Queryable data    |
+
+<TypeScriptExample>
+
+```ts
+export class ChatAgent extends Agent<Env, State> {
+  // State: current UI state
+  initialState = {
+    typing: [],
+    unreadCount: 0,
+    activeUsers: []
+  };
+
+  // SQL: message history
+  async getMessages(limit = 100) {
+    return this.sql`
+      SELECT * FROM messages
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  async saveMessage(message: Message) {
+    this.sql`
+      INSERT INTO messages (id, text, user_id, created_at)
+      VALUES (${message.id}, ${message.text}, ${message.userId}, ${Date.now()})
+    `;
+    // Update state for real-time UI
+    this.setState({
+      ...this.state,
+      unreadCount: this.state.unreadCount + 1
+    });
+  }
+}
+```
+
+</TypeScriptExample>
+
+### Avoid Infinite Loops
+
+Be careful not to trigger state updates in response to your own updates:
+
+<TypeScriptExample>
+
+```ts
+// Bad - infinite loop
+onStateUpdate(state: State) {
+  this.setState({ ...state, lastUpdated: Date.now() });
+}
+
+// Good - check source
+onStateUpdate(state: State, source: Connection | "server") {
+  if (source === "server") return;  // Do not react to own updates
+  this.setState({ ...state, lastUpdated: Date.now() });
+}
+```
+
+</TypeScriptExample>
+
+## SQL API
+
+Every individual Agent instance has its own SQL (SQLite) database that runs within the same context as the Agent itself. This means that inserting or querying data within your Agent is effectively zero-latency: the Agent does not have to round-trip across a continent or the world to access its own data.
+
+You can access the SQL API within any method on an Agent via `this.sql`:
+
+<TypeScriptExample>
+
+```ts
+export class MyAgent extends Agent<Env> {
+  async onRequest(request: Request) {
+    let userId = new URL(request.url).searchParams.get('userId');
+
+    // 'users' is just an example here: you can create arbitrary tables and define your own schemas
+    // within each Agent's database using SQL (SQLite syntax).
+    let [user] = this.sql`SELECT * FROM users WHERE id = ${userId}`
+    return Response.json(user)
+  }
+}
+```
+
+</TypeScriptExample>
+
+You can also supply a TypeScript type argument to the query, which will be used to infer the type of the result:
+
+<TypeScriptExample>
 
 ```ts
 type User = {
-	id: string;
-	name: string;
-	email: string;
+  id: string;
+  name: string;
+  email: string;
 };
 
 export class MyAgent extends Agent<Env> {
-	async onRequest(request: Request) {
-		let userId = new URL(request.url).searchParams.get('userId');
-		// Supply the type parameter to the query when calling this.sql
-		// This assumes the results returns one or more User rows with "id", "name", and "email" columns
-		const [user] = this.sql<User>`SELECT * FROM users WHERE id = ${userId}`;
-		return Response.json(user)
-	}
+  async onRequest(request: Request) {
+    let userId = new URL(request.url).searchParams.get('userId');
+    // Supply the type parameter to the query when calling this.sql
+    // This assumes the results returns one or more User rows with "id", "name", and "email" columns
+    const [user] = this.sql<User>`SELECT * FROM users WHERE id = ${userId}`;
+    return Response.json(user)
+  }
 }
 ```
+
+</TypeScriptExample>
 
 You do not need to specify an array type (`User[]` or `Array<User>`) as `this.sql` will always return an array of the specified type.
 
@@ -229,7 +614,7 @@ Learn more about the zero-latency SQL storage that powers both Agents and Durabl
 
 The SQL API exposed to an Agent is similar to the one [within Durable Objects](/durable-objects/api/sqlite-storage-api/#sql-api): Durable Object SQL methods available on `this.ctx.storage.sql`. You can use the same SQL queries with the Agent's database, create tables, and query data, just as you would with Durable Objects or [D1](/d1/).
 
-### Use Agent state as model context
+## Use Agent State as Model Context
 
 You can combine the state and SQL APIs in your Agent with its ability to [call AI models](/agents/api-reference/using-ai-models/) to include historical context within your prompts to a model. Modern Large Language Models (LLMs) often have very large context windows (up to millions of tokens), which allows you to pull relevant context into your prompt directly.
 
@@ -239,52 +624,76 @@ For example, you can use an Agent's built-in SQL database to pull history, query
 
 ```ts
 export class ReasoningAgent extends Agent<Env> {
-	async callReasoningModel(prompt: Prompt) {
-		let result = this.sql<History>`SELECT * FROM history WHERE user = ${prompt.userId} ORDER BY timestamp DESC LIMIT 1000`;
-		let context = [];
-		for (const row of result) {
-			context.push(row.entry);
-		}
+  async callReasoningModel(prompt: Prompt) {
+    let result = this.sql<History>`SELECT * FROM history WHERE user = ${prompt.userId} ORDER BY timestamp DESC LIMIT 1000`;
+    let context = [];
+    for (const row of result) {
+      context.push(row.entry);
+    }
 
-		const client = new OpenAI({
-			apiKey: this.env.OPENAI_API_KEY,
-		});
+    const client = new OpenAI({
+      apiKey: this.env.OPENAI_API_KEY,
+    });
 
-		// Combine user history with the current prompt
-		const systemPrompt = prompt.system || 'You are a helpful assistant.';
-		const userPrompt = `${prompt.user}\n\nUser history:\n${context.join('\n')}`;
+    // Combine user history with the current prompt
+    const systemPrompt = prompt.system || 'You are a helpful assistant.';
+    const userPrompt = `${prompt.user}\n\nUser history:\n${context.join('\n')}`;
 
-		try {
-			const completion = await client.chat.completions.create({
-				model: this.env.MODEL || 'o3-mini',
-				messages: [
-					{ role: 'system', content: systemPrompt },
-					{ role: 'user', content: userPrompt },
-				],
-				temperature: 0.7,
-				max_tokens: 1000,
-			});
+    try {
+      const completion = await client.chat.completions.create({
+        model: this.env.MODEL || 'o3-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
 
-			// Store the response in history
-			this
-				.sql`INSERT INTO history (timestamp, user, entry) VALUES (${new Date()}, ${prompt.userId}, ${completion.choices[0].message.content})`;
+      // Store the response in history
+      this
+        .sql`INSERT INTO history (timestamp, user, entry) VALUES (${new Date()}, ${prompt.userId}, ${completion.choices[0].message.content})`;
 
-			return completion.choices[0].message.content;
-		} catch (error) {
-			console.error('Error calling reasoning model:', error);
-			throw error;
-		}
-	}
+      return completion.choices[0].message.content;
+    } catch (error) {
+      console.error('Error calling reasoning model:', error);
+      throw error;
+    }
+  }
 }
 ```
 
 </TypeScriptExample>
 
-This works because each instance of an Agent has its _own_ database, the state stored in that database is private to that Agent: whether it's acting on behalf of a single user, a room or channel, or a deep research tool. By default, you don't have to manage contention or reach out over the network to a centralized database to retrieve and store state.
+This works because each instance of an Agent has its own database, and the state stored in that database is private to that Agent: whether it is acting on behalf of a single user, a room or channel, or a deep research tool. By default, you do not have to manage contention or reach out over the network to a centralized database to retrieve and store state.
 
-### Next steps
+## API Reference
 
-* Review the [API documentation](/agents/api-reference/agents-api/) for the Agents class to learn how to define them.
+### Properties
+
+| Property       | Type    | Description                  |
+| -------------- | ------- | ---------------------------- |
+| `state`        | `State` | Current state (getter)       |
+| `initialState` | `State` | Default state for new agents |
+
+### Methods
+
+| Method          | Signature                                                | Description                          |
+| --------------- | -------------------------------------------------------- | ------------------------------------ |
+| `setState`      | `(state: State) => void`                                 | Update state, persist, and broadcast |
+| `onStateUpdate` | `(state: State, source: Connection \| "server") => void` | Called when state changes            |
+
+### Workflow Step Methods
+
+| Method                          | Description                           |
+| ------------------------------- | ------------------------------------- |
+| `step.updateAgentState(state)`  | Replace agent state from workflow     |
+| `step.mergeAgentState(partial)` | Merge partial state from workflow     |
+| `step.resetAgentState()`        | Reset to `initialState` from workflow |
+
+## Next Steps
+
+* Review the [API documentation](/agents/api-reference/agents-api/) for the Agents class.
 * [Build a chat Agent](/agents/getting-started/build-a-chat-agent/) using the Agents SDK and deploy it to Workers.
-* Learn more [using WebSockets](/agents/api-reference/websockets/) to build interactive Agents and stream data back from your Agent.
-* [Orchestrate asynchronous workflows](/agents/api-reference/run-workflows) from your Agent by combining the Agents SDK and [Workflows](/workflows).
+* Learn more about [using WebSockets](/agents/api-reference/websockets/) to build interactive Agents and stream data back from your Agent.
+* [Orchestrate asynchronous workflows](/agents/api-reference/run-workflows/) from your Agent by combining the Agents SDK and [Workflows](/workflows/).
